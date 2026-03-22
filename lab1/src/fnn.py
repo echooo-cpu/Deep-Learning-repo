@@ -1,6 +1,7 @@
 import os
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split
 from sklearn.datasets import load_diabetes
 from sklearn.preprocessing import StandardScaler
@@ -8,6 +9,7 @@ import yaml
 import logging
 import argparse
 from tqdm import tqdm
+import json
 
 
 # ...existing code...
@@ -17,14 +19,11 @@ def load_dataset():
     diabets = load_diabetes()
     X , y = diabets.data, diabets.target
 
-    # 注意这里的参数名应为 random_state
     x_train_valid, x_test, y_train_valid, y_test = train_test_split(X, y, test_size = 1/6, random_state = 42)
     x_train, x_valid, y_train, y_valid = train_test_split(x_train_valid, y_train_valid, test_size = 1/5, random_state = 42)
 
-    # 1. 初始化标准化器
+
     scaler = StandardScaler()
-    
-    # 2. 仅在训练集上 fit，并进行 transform
     x_train = scaler.fit_transform(x_train)
     
     # 3. 使用训练集得到的均值和方差来 transform 验证集和测试集
@@ -65,27 +64,27 @@ class fnn(nn.Module):
 
         if self.fnn_class == 'small':
             self.net = nn.Sequential(
-                nn.linear(10, config['model']['hidden_dim']),
+                nn.Linear(10, config['model']['hidden_dim']),
                 self.activation,
-                nn.linear(config['model']['hidden_dim'], 1)
+                nn.Linear(config['model']['hidden_dim'], 1)
             )
         elif self.fnn_class == 'medium':
             self.net = nn.Sequential(
-                nn.linear(10, config['model']['hidden_dim1']),
+                nn.Linear(10, config['model']['hidden_dim1']),
                 self.activation,
-                nn.linear(config['model']['hidden_dim1'], config['model']['hidden_dim2']),
+                nn.Linear(config['model']['hidden_dim1'], config['model']['hidden_dim2']),
                 self.activation,
-                nn.linear(config['model']['hidden_dim2'], 1)
+                nn.Linear(config['model']['hidden_dim2'], 1)
             )
         elif self.fnn_class == 'large':
             self.net = nn.Sequential(
-                nn.linear(10, config['model']['hidden_dim1']),
+                nn.Linear(10, config['model']['hidden_dim1']),
                 self.activation,
-                nn.linear(config['model']['hidden_dim1'], config['model']['hidden_dim2']),
+                nn.Linear(config['model']['hidden_dim1'], config['model']['hidden_dim2']),
                 self.activation,
-                nn.linear(config['model']['hidden_dim2'], config['model']['hidden_dim3']),
+                nn.Linear(config['model']['hidden_dim2'], config['model']['hidden_dim3']),
                 self.activation,
-                nn.linear(config['model']['hidden_dim3'], 1)
+                nn.Linear(config['model']['hidden_dim3'], 1)
             )
         else:
             raise ValueError(f"unkown fnn_class: {self.fnn_class}")
@@ -94,24 +93,32 @@ class fnn(nn.Module):
     def forward(self,x):
         return self.net(x)
     
+def set_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 def main():
 
+    set_seed(42)
     # 设置命令行参数解析
     parser = argparse.ArgumentParser(description="FNN 训练脚本")
     parser.add_argument('--config', type=str, default='config.yaml', help='YAML 配置文件的路径')
-    parser.add_argument('batch_size', type=int, help='训练的批次大小')
-    parser.add_argument('optimizer', type=str, help='优化器类型，例如 adam 或 sgd')
+    parser.add_argument('--batch_size', type=int, help='训练的批次大小')
+    parser.add_argument('--optimizer', type=str, help='优化器类型，例如 adam 或 sgd')
     args = parser.parse_args()
-
-    max_epochs = 100
 
 
     with open(f'../config/{args.config}', 'r') as f:
         config = yaml.safe_load(f)
+    logging.info(f"config: {config}")
     
     
-    log_name = f"fnn_{config['model']['fnn_class']}_{config['model']['activation']} \
-        _{config['learning_rate']}_bsz{args.batch_size}_opt{args.optimizer}"
+    log_name = (
+        f"fnn_{config['model']['fnn_class']}_{config['model']['activation']}"
+        f"_{config['learning_rate']}_bsz{args.batch_size}_opt{args.optimizer}"
+    )
     log_file_path = f"../result/{log_name}"
     os.makedirs(log_file_path, exist_ok=True)
 
@@ -123,36 +130,81 @@ def main():
         ]
     )
 
-    x_train, y_train, x_valid, y_valid, x_test, y_test = load_dataset()
+    max_epochs = 100
+    device = torch.device('cuda')
 
-    model = fnn(config)
+    x_train, y_train, x_valid, y_valid, x_test, y_test = load_dataset()
+    train_dataset = TensorDataset(x_train, y_train)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True) 
+    x_valid, y_valid = x_valid.to(device), y_valid.to(device)
+    x_test, y_test = x_test.to(device), y_test.to(device)
+
+    model = fnn(config).to(device)
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate']) if args.optimizer.lower() == 'adam' \
           else torch.optim.SGD(model.parameters(), lr=config['learning_rate'])
 
-    logging.info(f"config: {config}")
 
-    valid_loss_history = []
-    valid_loss_history.append(float('inf'))  # 初始化验证损失历史，初始值为无穷大
+    history = {
+        'train_loss': [],
+        'valid_loss': []
+    }
+
+    best_valid_loss = float('inf')
+    patience_counter = 0
+    patience = 5
+
 
     for epoch in tqdm(range(max_epochs)):
         logging.info(f"Epoch {epoch+1}/{max_epochs}")
         model.train()
-        pred = model(x_train)
-        loss = criterion(pred, y_train)
+        epoch_train_loss = 0.0
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        for batch_x, batch_y in train_loader:
+            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
 
-        valid_pred = model(x_valid)
-        valid_loss = criterion(valid_pred, y_valid) 
-        valid_loss_history.append(valid_loss.item())
+            pred = model(batch_x)
+            loss = criterion(pred, batch_y)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-        if valid_loss_history[-1] == min(valid_loss_history):
+            epoch_train_loss += loss.item() * batch_x.size(0)
+        
+        epoch_train_loss /= len(train_dataset)
+        history['train_loss'].append(epoch_train_loss)
+
+
+        model.eval()
+        with torch.no_grad():
+            valid_pred = model(x_valid)
+            valid_loss = criterion(valid_pred, y_valid) 
+
+        current_valid_loss = valid_loss.item()
+        history['valid_loss'].append(current_valid_loss)
+        logging.info(f"Epoch {epoch+1}/{max_epochs} - Train Loss: {epoch_train_loss:.4f} - Valid Loss: {current_valid_loss:.4f}")
+        
+        if current_valid_loss < best_valid_loss:
+            best_valid_loss = current_valid_loss
+            patience_counter = 0
             torch.save(model.state_dict(), f"{log_file_path}/model_{log_name}.pth")
+        else:
+            patience_counter += 1
+
+        if patience_counter >= patience:
+            logging.info(f"Early stopping triggered at epoch {epoch+1}")
             break
 
+    model.load_state_dict(torch.load(f"{log_file_path}/model_{log_name}.pth"))
+    model.eval()
+    with torch.no_grad():
+        test_pred = model(x_test)
+        test_loss = criterion(test_pred, y_test)
+    logging.info(f"Final Test Loss: {test_loss.item():.4f}")
+
+    # 保存历史记录为 JSON 文件，后续用来画图
+    with open(f"{log_file_path}/metrics_{log_name}.json", "w") as f:
+        json.dump(history, f)
 
 
 

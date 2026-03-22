@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "D:\table\dl\lab\lab1\src\fnn.py", line 215, in <module>
+    main()
+  File "D:\table\dl\lab\lab1\src\fnn.py", line 113, in main
+    with open(f'../config/{args.config}', 'r') as f:
+FileNotFoundError: [Errno 2] No such file or directory: '../config/config.yaml'
