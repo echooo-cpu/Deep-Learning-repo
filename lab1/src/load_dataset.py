@@ -30,3 +30,9 @@ print("bmi: 身体质量指数")
 print("bp: 平均血压")
 print("s1~s6: 六种血清含量指标")
 print("-" * 40)
+
+# 检查特征是否标准化
+print("\n特征统计信息查验:")
+print(df.drop(columns=["target"]).describe().round(4))  # 保留4位小数方便观察均值和标准差
+
+

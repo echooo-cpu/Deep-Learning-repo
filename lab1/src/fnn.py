@@ -17,12 +17,21 @@ def load_dataset():
     x_train_valid, x_test, y_train_valid, y_test = train_test_split(X, y, test_size=1/6, random_state=42)
     x_train, x_valid, y_train, y_valid = train_test_split(x_train_valid, y_train_valid, test_size=1/5, random_state=42)
 
-    scaler = StandardScaler()
-    x_train = scaler.fit_transform(x_train)
-    
-    # 使用训练集得到的均值和方差来 transform 验证集和测试集
-    x_valid = scaler.transform(x_valid)
-    x_test = scaler.transform(x_test)
+    x_train, x_valid, y_train, y_valid = train_test_split(x_train_valid, y_train_valid, test_size=1/5, random_state=42)
+
+    # 对特征 x 进行标准化 (解开你之前的注释)
+    x_scaler = StandardScaler()
+    x_train = x_scaler.fit_transform(x_train)
+    x_valid = x_scaler.transform(x_valid)
+    x_test = x_scaler.transform(x_test)
+
+    # ===== 新增：对目标变量 y 进行标准化 =====
+    y_scaler = StandardScaler()
+    # StandardScaler 要求输入为二维数组，需要先 reshape(-1, 1)
+    y_train = y_scaler.fit_transform(y_train.reshape(-1, 1))
+    y_valid = y_scaler.transform(y_valid.reshape(-1, 1))
+    y_test = y_scaler.transform(y_test.reshape(-1, 1))
+    # ==========================================
 
     # 转换为 PyTorch 的张量格式 (顺便把 y_test 等转换为列向量以适配神经网络)
     x_train = torch.tensor(x_train, dtype=torch.float32)
@@ -35,7 +44,7 @@ def load_dataset():
     y_test = torch.tensor(y_test, dtype=torch.float32).view(-1, 1)
 
     print(f"Dataset sizes -> Train: {x_train.shape}, Valid: {x_valid.shape}, Test: {x_test.shape}")
-    return x_train, y_train, x_valid, y_valid, x_test, y_test
+    return x_train, y_train, x_valid, y_valid, x_test, y_test, y_scaler
 
 
 class FNN(nn.Module):
@@ -108,11 +117,11 @@ def main():
     parser.add_argument('--batch_size', type=int, default=32, help='批次大小')
     parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'sgd'], help='优化器')
     parser.add_argument('--epochs', type=int, default=100, help='最大训练轮数')
-    parser.add_argument('--patience', type=int, default=5, help='早停容忍度')
+    parser.add_argument('--info',type=str, default='', help='额外信息，用于日志命名')
     args = parser.parse_args()
 
     # 动态生成日志和保存路径
-    log_name = f"fnn_{args.fnn_class}_{args.activation}_lr{args.lr}_bsz{args.batch_size}_opt{args.optimizer}"
+    log_name = f"{args.info}_fnn_{args.fnn_class}_{args.activation}_lr{args.lr}_bsz{args.batch_size}_opt{args.optimizer}"
     log_dir = os.path.join("..", "result", log_name)
     os.makedirs(log_dir, exist_ok=True)
 
@@ -122,7 +131,7 @@ def main():
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler(os.path.join(log_dir, f"{log_name}.log"), mode='w', encoding='utf-8'),
-            logging.StreamHandler()
+            #logging.StreamHandler() # 可选：同时输出到控制台
         ]
     )
     
@@ -131,7 +140,8 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f"Using device: {device}")
 
-    x_train, y_train, x_valid, y_valid, x_test, y_test = load_dataset()
+    x_train, y_train, x_valid, y_valid, x_test, y_test , y_scaler = load_dataset()
+    y_var = y_scaler.var_[0]
     train_dataset = TensorDataset(x_train, y_train)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True) 
     
@@ -148,9 +158,9 @@ def main():
 
     history = {'train_loss': [], 'valid_loss': []}
     best_valid_loss = float('inf')
-    patience_counter = 0
+    best_epoch = -1
 
-    for epoch in tqdm(range(args.epochs), desc="Training"):
+    for epoch in tqdm(range(args.epochs), desc=f"Training",unit="epoch"):
         model.train()
         epoch_train_loss = 0.0
 
@@ -164,7 +174,7 @@ def main():
             loss.backward()
             optimizer.step()
 
-            epoch_train_loss += loss.item() * batch_x.size(0)
+            epoch_train_loss += (loss.item() * y_var) * batch_x.size(0)
         
         epoch_train_loss /= len(train_dataset)
         history['train_loss'].append(epoch_train_loss)
@@ -174,22 +184,17 @@ def main():
             valid_pred = model(x_valid)
             valid_loss = criterion(valid_pred, y_valid) 
 
-        current_valid_loss = valid_loss.item()
+        current_valid_loss = valid_loss.item()*y_var
         history['valid_loss'].append(current_valid_loss)
         
-        logging.info(f"Epoch {epoch+1:03d}/{args.epochs} - Train Loss: {epoch_train_loss:.4f} - Valid Loss: {current_valid_loss:.4f}")
+        if (epoch + 1) % 5 == 0 or epoch == 0:
+            logging.info(f"Epoch {epoch+1:03d}/{args.epochs} - Train Loss: {epoch_train_loss:.4f} - Valid Loss: {current_valid_loss:.4f}")
         
         model_save_path = os.path.join(log_dir, f"model_{log_name}.pth")
         if current_valid_loss < best_valid_loss:
+            best_epoch = epoch
             best_valid_loss = current_valid_loss
-            patience_counter = 0
             torch.save(model.state_dict(), model_save_path)
-        else:
-            patience_counter += 1
-
-        if patience_counter >= args.patience:
-            logging.info(f"Early stopping triggered at epoch {epoch+1}")
-            break
 
     if os.path.exists(model_save_path):
         model.load_state_dict(torch.load(model_save_path))
@@ -198,7 +203,8 @@ def main():
     with torch.no_grad():
         test_pred = model(x_test)
         test_loss = criterion(test_pred, y_test)
-    logging.info(f"Final Test Loss: {test_loss.item():.4f}")
+    final_test_loss = test_loss.item() * y_var
+    logging.info(f"Best epoch : {best_epoch}. Final Test Loss: {final_test_loss.item():.4f}")
 
     # ==========================
     # 绘图部分 (替代原有的 JSON)
@@ -209,6 +215,12 @@ def main():
     plt.plot(history['train_loss'], label='Train Loss', color='blue', linewidth=2)
     plt.plot(history['valid_loss'], label='Valid Loss', color='orange', linewidth=2)
     
+    # 新增：标出 Best Epoch 的位置 
+    plt.axvline(x=best_epoch, color='red', linestyle='--', alpha=0.7, label=f'Best Epoch ({best_epoch})')
+    
+    # 新增：在图例中加入一条不显示的线，只为了显示文字描述 Test Loss
+    plt.plot([], [], ' ', label=f'Test Loss: {final_test_loss.item():.4f}')
+
     # 图表装饰
     plt.title(f'Training and Validation Loss\n({log_name})', fontsize=14)
     plt.xlabel('Epochs', fontsize=12)
@@ -222,7 +234,7 @@ def main():
     logging.info(f"Loss curve saved to: {plot_path}")
     
     # 直接在屏幕上显示图像
-    plt.show()
+    #plt.show()
 
 if __name__ == "__main__":
     main()
