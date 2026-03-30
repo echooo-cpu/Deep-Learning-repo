@@ -8,7 +8,7 @@ from sklearn.preprocessing import StandardScaler
 import logging
 import argparse
 from tqdm import tqdm
-import matplotlib.pyplot as plt  # 新增：用于绘图
+import matplotlib.pyplot as plt  
 
 def load_dataset():
     diabetes = load_diabetes()
@@ -19,21 +19,16 @@ def load_dataset():
 
     x_train, x_valid, y_train, y_valid = train_test_split(x_train_valid, y_train_valid, test_size=1/5, random_state=42)
 
-    # 对特征 x 进行标准化 (解开你之前的注释)
     x_scaler = StandardScaler()
     x_train = x_scaler.fit_transform(x_train)
     x_valid = x_scaler.transform(x_valid)
     x_test = x_scaler.transform(x_test)
 
-    # ===== 新增：对目标变量 y 进行标准化 =====
     y_scaler = StandardScaler()
-    # StandardScaler 要求输入为二维数组，需要先 reshape(-1, 1)
     y_train = y_scaler.fit_transform(y_train.reshape(-1, 1))
     y_valid = y_scaler.transform(y_valid.reshape(-1, 1))
     y_test = y_scaler.transform(y_test.reshape(-1, 1))
-    # ==========================================
 
-    # 转换为 PyTorch 的张量格式 (顺便把 y_test 等转换为列向量以适配神经网络)
     x_train = torch.tensor(x_train, dtype=torch.float32)
     y_train = torch.tensor(y_train, dtype=torch.float32).view(-1, 1)
     
@@ -52,7 +47,6 @@ class FNN(nn.Module):
         super().__init__()
         self.fnn_class = fnn_class
 
-        # 使用字典简化激活函数的选择
         activations = {
             'relu': nn.ReLU(),
             'tanh': nn.Tanh(),
@@ -65,8 +59,7 @@ class FNN(nn.Module):
             raise ValueError(f"Unknown activation: {activation_name}")
         self.activation = activations[activation_name]
 
-        # 确保传入的 hidden_dims 数量足够支撑对应的网络规模
-        h_dims = hidden_dims + [10] * (3 - len(hidden_dims)) # 补齐防止索引越界
+        h_dims = hidden_dims + [10] * (3 - len(hidden_dims)) 
 
         if self.fnn_class == 'small':
             self.net = nn.Sequential(
@@ -120,18 +113,15 @@ def main():
     parser.add_argument('--info',type=str, default='', help='额外信息，用于日志命名')
     args = parser.parse_args()
 
-    # 动态生成日志和保存路径
     log_name = f"{args.info}_fnn_{args.fnn_class}_{args.activation}_lr{args.lr}_bsz{args.batch_size}_opt{args.optimizer}"
     log_dir = os.path.join("..", "result", log_name)
     os.makedirs(log_dir, exist_ok=True)
 
-    # 配置日志
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler(os.path.join(log_dir, f"{log_name}.log"), mode='w', encoding='utf-8'),
-            #logging.StreamHandler() # 可选：同时输出到控制台
         ]
     )
     
@@ -206,34 +196,23 @@ def main():
     final_test_loss = test_loss.item() * y_var
     logging.info(f"Best epoch : {best_epoch}. Final Test Loss: {final_test_loss.item():.4f}")
 
-    # ==========================
-    # 绘图部分 (替代原有的 JSON)
-    # ==========================
     plt.figure(figsize=(10, 6))
     
-    # 绘制训练和验证损失曲线
     plt.plot(history['train_loss'], label='Train Loss', color='blue', linewidth=2)
     plt.plot(history['valid_loss'], label='Valid Loss', color='orange', linewidth=2)
-    
-    # 新增：标出 Best Epoch 的位置 
     plt.axvline(x=best_epoch, color='red', linestyle='--', alpha=0.7, label=f'Best Epoch ({best_epoch})')
-    
-    # 新增：在图例中加入一条不显示的线，只为了显示文字描述 Test Loss
     plt.plot([], [], ' ', label=f'Test Loss: {final_test_loss.item():.4f}')
 
-    # 图表装饰
+
     plt.title(f'Training and Validation Loss\n({log_name})', fontsize=14)
     plt.xlabel('Epochs', fontsize=12)
     plt.ylabel('Loss (MSE)', fontsize=12)
     plt.legend(fontsize=12)
     plt.grid(True, linestyle='--', alpha=0.7)
-    
-    # 保存图像到对应日志目录
     plot_path = os.path.join(log_dir, f"loss_curve_{log_name}.png")
     plt.savefig(plot_path, bbox_inches='tight')
     logging.info(f"Loss curve saved to: {plot_path}")
     
-    # 直接在屏幕上显示图像
     #plt.show()
 
 if __name__ == "__main__":
